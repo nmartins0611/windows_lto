@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bufio"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -33,6 +34,15 @@ type LTOMonitor struct {
 func main() {
 	// Parse command line flags
 	testEmail := flag.Bool("test", false, "Send a test email and exit")
+	createConfig := flag.Bool("setup", false, "Create a new config.json file interactively")
+	smtpServer := flag.String("smtp-server", "", "SMTP server address")
+	smtpPort := flag.String("smtp-port", "587", "SMTP port")
+	smtpUser := flag.String("smtp-user", "", "SMTP username")
+	smtpPassword := flag.String("smtp-password", "", "SMTP password")
+	fromEmail := flag.String("from-email", "", "From email address")
+	toEmail := flag.String("to-email", "", "Administrator email address")
+	checkTime := flag.String("check-time", "08:00", "Daily check time (HH:MM format)")
+	
 	flag.Parse()
 
 	// Initialize logger
@@ -49,6 +59,23 @@ func main() {
 	
 	logger.Println("=== LTO Monitor starting ===")
 	consoleLogger.Println("LTO Monitor starting...")
+
+	// If setup flag is provided, create config interactively
+	if *createConfig {
+		createConfigInteractively(logger, consoleLogger)
+		return
+	}
+
+	// If command line args provided, create config from them
+	if *smtpServer != "" || *smtpUser != "" || *toEmail != "" {
+		err := createConfigFromArgs(*smtpServer, *smtpPort, *smtpUser, *smtpPassword, 
+			*fromEmail, *toEmail, *checkTime, logger, consoleLogger)
+		if err != nil {
+			consoleLogger.Fatalf("Failed to create config: %v", err)
+		}
+		consoleLogger.Println("Configuration created successfully!")
+		return
+	}
 
 	// Load configuration
 	config, err := loadConfig("config.json")
@@ -76,33 +103,148 @@ func main() {
 	monitor.run()
 }
 
+func createConfigFromArgs(smtpServer, smtpPort, smtpUser, smtpPassword, fromEmail, toEmail, checkTime string, logger, consoleLogger *log.Logger) error {
+	logger.Println("Creating configuration from command line arguments")
+	consoleLogger.Println("Creating configuration from command line arguments...")
+
+	// Validate required fields
+	if smtpServer == "" {
+		return fmt.Errorf("smtp-server is required")
+	}
+	if smtpUser == "" {
+		return fmt.Errorf("smtp-user is required")
+	}
+	if toEmail == "" {
+		return fmt.Errorf("to-email is required")
+	}
+
+	// Set defaults
+	if fromEmail == "" {
+		fromEmail = smtpUser
+	}
+	if smtpPassword == "" {
+		consoleLogger.Print("Enter SMTP password: ")
+		scanner := bufio.NewScanner(os.Stdin)
+		if scanner.Scan() {
+			smtpPassword = scanner.Text()
+		}
+	}
+
+	config := Config{
+		SMTPServer:   smtpServer,
+		SMTPPort:     smtpPort,
+		SMTPUser:     smtpUser,
+		SMTPPassword: smtpPassword,
+		FromEmail:    fromEmail,
+		ToEmail:      toEmail,
+		CheckTime:    checkTime,
+	}
+
+	return saveConfig(config, "config.json", logger, consoleLogger)
+}
+
+func createConfigInteractively(logger, consoleLogger *log.Logger) {
+	logger.Println("Creating configuration interactively")
+	consoleLogger.Println("=== LTO Monitor Configuration Setup ===")
+	consoleLogger.Println("Please provide the following email server details:")
+
+	scanner := bufio.NewScanner(os.Stdin)
+	config := Config{}
+
+	// SMTP Server
+	consoleLogger.Print("SMTP Server (e.g., smtp.gmail.com): ")
+	scanner.Scan()
+	config.SMTPServer = strings.TrimSpace(scanner.Text())
+
+	// SMTP Port
+	consoleLogger.Print("SMTP Port [587]: ")
+	scanner.Scan()
+	port := strings.TrimSpace(scanner.Text())
+	if port == "" {
+		config.SMTPPort = "587"
+	} else {
+		config.SMTPPort = port
+	}
+
+	// SMTP User
+	consoleLogger.Print("SMTP Username (email): ")
+	scanner.Scan()
+	config.SMTPUser = strings.TrimSpace(scanner.Text())
+
+	// SMTP Password
+	consoleLogger.Print("SMTP Password: ")
+	scanner.Scan()
+	config.SMTPPassword = strings.TrimSpace(scanner.Text())
+
+	// From Email
+	consoleLogger.Printf("From Email [%s]: ", config.SMTPUser)
+	scanner.Scan()
+	fromEmail := strings.TrimSpace(scanner.Text())
+	if fromEmail == "" {
+		config.FromEmail = config.SMTPUser
+	} else {
+		config.FromEmail = fromEmail
+	}
+
+	// To Email
+	consoleLogger.Print("Administrator Email (notifications): ")
+	scanner.Scan()
+	config.ToEmail = strings.TrimSpace(scanner.Text())
+
+	// Check Time
+	consoleLogger.Print("Daily Check Time (HH:MM) [08:00]: ")
+	scanner.Scan()
+	checkTime := strings.TrimSpace(scanner.Text())
+	if checkTime == "" {
+		config.CheckTime = "08:00"
+	} else {
+		config.CheckTime = checkTime
+	}
+
+	// Validate required fields
+	if config.SMTPServer == "" || config.SMTPUser == "" || config.SMTPPassword == "" || config.ToEmail == "" {
+		consoleLogger.Println("ERROR: All fields except 'From Email' and 'Check Time' are required!")
+		return
+	}
+
+	// Save configuration
+	err := saveConfig(config, "config.json", logger, consoleLogger)
+	if err != nil {
+		consoleLogger.Printf("Failed to save configuration: %v", err)
+		return
+	}
+
+	consoleLogger.Println("\n=== Configuration Summary ===")
+	consoleLogger.Printf("SMTP Server: %s:%s", config.SMTPServer, config.SMTPPort)
+	consoleLogger.Printf("From Email: %s", config.FromEmail)
+	consoleLogger.Printf("To Email: %s", config.ToEmail)
+	consoleLogger.Printf("Check Time: %s", config.CheckTime)
+	consoleLogger.Println("\nConfiguration saved successfully!")
+	consoleLogger.Println("You can now run the application normally or use --test to send a test email.")
+}
+
+func saveConfig(config Config, filename string, logger, consoleLogger *log.Logger) error {
+	data, err := json.MarshalIndent(config, "", "  ")
+	if err != nil {
+		return fmt.Errorf("failed to marshal config: %v", err)
+	}
+
+	err = os.WriteFile(filename, data, 0600)
+	if err != nil {
+		return fmt.Errorf("failed to write config file: %v", err)
+	}
+
+	logger.Printf("Configuration saved to %s", filename)
+	return nil
+}
+	var config Config
+
 func loadConfig(filename string) (Config, error) {
 	var config Config
 
 	// Check if config file exists
 	if _, err := os.Stat(filename); os.IsNotExist(err) {
-		// Create a sample config file if it doesn't exist
-		sampleConfig := Config{
-			SMTPServer:   "smtp.gmail.com",
-			SMTPPort:     "587",
-			SMTPUser:     "your-email@gmail.com",
-			SMTPPassword: "your-app-password",
-			FromEmail:    "your-email@gmail.com",
-			ToEmail:      "admin@company.com",
-			CheckTime:    "08:00",
-		}
-
-		data, err := json.MarshalIndent(sampleConfig, "", "  ")
-		if err != nil {
-			return config, fmt.Errorf("failed to marshal sample config: %v", err)
-		}
-
-		err = os.WriteFile(filename, data, 0600)
-		if err != nil {
-			return config, fmt.Errorf("failed to create sample config file: %v", err)
-		}
-
-		return config, fmt.Errorf("config file '%s' did not exist. A sample config has been created. Please edit it with your settings and restart the application", filename)
+		return config, fmt.Errorf("config file '%s' not found. Use --setup for interactive setup or provide command line arguments", filename)
 	}
 
 	// Read the config file
@@ -132,6 +274,7 @@ func loadConfig(filename string) (Config, error) {
 	}
 
 	return config, nil
+}
 }
 
 func getEnvOrDefault(key, defaultValue string) string {
