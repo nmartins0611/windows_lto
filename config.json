@@ -1,9 +1,0 @@
-{
-  "smtp_server": "smtp.gmail.com",
-  "smtp_port": "587",
-  "smtp_user": "your-email@gmail.com",
-  "smtp_password": "your-app-password",
-  "from_email": "your-email@gmail.com",
-  "to_email": "admin@company.com",
-  "check_time": "08:00"
-}
