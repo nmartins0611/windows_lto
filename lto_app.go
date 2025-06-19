@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"flag"
 	"fmt"
 	"log"
 	"net/smtp"
@@ -24,11 +25,16 @@ type Config struct {
 
 // LTOMonitor handles the monitoring logic
 type LTOMonitor struct {
-	config Config
-	logger *log.Logger
+	config        Config
+	logger        *log.Logger
+	consoleLogger *log.Logger
 }
 
 func main() {
+	// Parse command line flags
+	testEmail := flag.Bool("test", false, "Send a test email and exit")
+	flag.Parse()
+
 	// Initialize logger
 	logFile, err := os.OpenFile("lto_monitor.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0666)
 	if err != nil {
@@ -36,18 +42,34 @@ func main() {
 	}
 	defer logFile.Close()
 
-	logger := log.New(logFile, "", log.LstdFlags)
-	logger.Println("LTO Monitor starting...")
+	logger := log.New(logFile, "", log.LstdFlags|log.Lshortfile)
+	
+	// Also log to console for immediate feedback
+	consoleLogger := log.New(os.Stdout, "", log.LstdFlags)
+	
+	logger.Println("=== LTO Monitor starting ===")
+	consoleLogger.Println("LTO Monitor starting...")
 
 	// Load configuration
 	config, err := loadConfig("config.json")
 	if err != nil {
 		logger.Fatalf("Failed to load configuration: %v", err)
+		consoleLogger.Fatalf("Failed to load configuration: %v", err)
 	}
 
+	logger.Printf("Configuration loaded successfully. Check time: %s, Admin email: %s", 
+		config.CheckTime, config.ToEmail)
+
 	monitor := &LTOMonitor{
-		config: config,
-		logger: logger,
+		config:        config,
+		logger:        logger,
+		consoleLogger: consoleLogger,
+	}
+
+	// If test flag is provided, send test email and exit
+	if *testEmail {
+		monitor.sendTestEmail()
+		return
 	}
 
 	// Run the monitoring loop
@@ -120,13 +142,15 @@ func getEnvOrDefault(key, defaultValue string) string {
 }
 
 func (m *LTOMonitor) run() {
-	m.logger.Println("Monitor started. Checking time:", m.config.CheckTime)
+	m.logger.Printf("Monitor started. Checking time: %s", m.config.CheckTime)
+	m.consoleLogger.Printf("Monitor started. Daily check scheduled for: %s", m.config.CheckTime)
 
 	for {
 		now := time.Now()
 		targetTime, err := time.Parse("15:04", m.config.CheckTime)
 		if err != nil {
-			m.logger.Printf("Error parsing check time: %v", err)
+			m.logger.Printf("ERROR: Error parsing check time: %v", err)
+			m.consoleLogger.Printf("ERROR: Error parsing check time: %v", err)
 			time.Sleep(1 * time.Minute)
 			continue
 		}
@@ -143,6 +167,7 @@ func (m *LTOMonitor) run() {
 		// Sleep until target time
 		duration := target.Sub(now)
 		m.logger.Printf("Next check scheduled for: %v (sleeping for %v)", target, duration)
+		m.consoleLogger.Printf("Next check scheduled for: %v (sleeping for %v)", target, duration)
 		time.Sleep(duration)
 
 		// Perform the check
@@ -154,17 +179,26 @@ func (m *LTOMonitor) run() {
 }
 
 func (m *LTOMonitor) performCheck() {
-	m.logger.Println("Performing LTO library check...")
+	m.logger.Println("=== Performing LTO library check ===")
+	m.consoleLogger.Println("Performing LTO library check...")
 
+	startTime := time.Now()
 	connected := m.checkLTOConnection()
+	duration := time.Since(startTime)
 	
 	if connected {
-		m.logger.Println("LTO library is connected")
-		m.sendEmail("LTO Library Status - OK", "The LTO library is connected and accessible.")
+		m.logger.Printf("SUCCESS: LTO library is connected (check took %v)", duration)
+		m.consoleLogger.Println("SUCCESS: LTO library is connected")
+		m.sendEmail("LTO Library Status - OK", 
+			fmt.Sprintf("The LTO library is connected and accessible.\n\nCheck completed in: %v", duration))
 	} else {
-		m.logger.Println("LTO library connection failed!")
-		m.sendEmail("LTO Library Status - ERROR", "WARNING: The LTO library connection check failed. Please verify the connection and Atto SAS card status.")
+		m.logger.Printf("FAILURE: LTO library connection failed! (check took %v)", duration)
+		m.consoleLogger.Println("FAILURE: LTO library connection failed!")
+		m.sendEmail("LTO Library Status - ERROR", 
+			fmt.Sprintf("WARNING: The LTO library connection check failed. Please verify the connection and Atto SAS card status.\n\nCheck completed in: %v", duration))
 	}
+	
+	m.logger.Println("=== Check completed ===")
 }
 
 func (m *LTOMonitor) checkLTOConnection() bool {
@@ -203,8 +237,11 @@ func (m *LTOMonitor) checkDeviceManager() bool {
 	m.logger.Printf("Device Manager output: %s", outputStr)
 	
 	// Check if Atto or SAS controller is present and OK
-	return strings.Contains(strings.ToLower(outputStr), "atto") || 
-		   (strings.Contains(strings.ToLower(outputStr), "sas") && strings.Contains(strings.ToLower(outputStr), "ok"))
+	result := strings.Contains(strings.ToLower(outputStr), "atto") || 
+		     (strings.Contains(strings.ToLower(outputStr), "sas") && strings.Contains(strings.ToLower(outputStr), "ok"))
+		     
+	m.logger.Printf("Device Manager check result: %v", result)
+	return result
 }
 
 func (m *LTOMonitor) checkWMI() bool {
@@ -217,15 +254,15 @@ func (m *LTOMonitor) checkWMI() bool {
 	output, err := cmd.Output()
 	if err != nil {
 		m.logger.Printf("WMI tape drive check error: %v", err)
-		return false
-	}
-
-	outputStr := string(output)
-	m.logger.Printf("WMI tape drive output: %s", outputStr)
-	
-	// Check if any tape drives are found
-	if strings.Contains(strings.ToLower(outputStr), "tape") {
-		return true
+	} else {
+		outputStr := string(output)
+		m.logger.Printf("WMI tape drive output: %s", outputStr)
+		
+		// Check if any tape drives are found
+		if strings.Contains(strings.ToLower(outputStr), "tape") {
+			m.logger.Printf("WMI tape drive check result: true")
+			return true
+		}
 	}
 
 	// Also check for medium changers (library)
@@ -238,10 +275,12 @@ func (m *LTOMonitor) checkWMI() bool {
 		return false
 	}
 
-	outputStr = string(output)
+	outputStr := string(output)
 	m.logger.Printf("WMI medium changer output: %s", outputStr)
 	
-	return strings.Contains(strings.ToLower(outputStr), "changer")
+	result := strings.Contains(strings.ToLower(outputStr), "changer")
+	m.logger.Printf("WMI medium changer check result: %v", result)
+	return result
 }
 
 func (m *LTOMonitor) checkTapeDevices() bool {
@@ -260,11 +299,19 @@ func (m *LTOMonitor) checkTapeDevices() bool {
 	outputStr := string(output)
 	m.logger.Printf("Tape device output: %s", outputStr)
 	
-	return strings.Contains(strings.ToUpper(outputStr), "TAPE")
+	result := strings.Contains(strings.ToUpper(outputStr), "TAPE")
+	m.logger.Printf("Tape device check result: %v", result)
+	return result
 }
 
 func (m *LTOMonitor) sendEmail(subject, body string) {
-	m.logger.Printf("Sending email: %s", subject)
+	m.logger.Printf("=== Attempting to send email ===")
+	m.logger.Printf("Subject: %s", subject)
+	m.logger.Printf("To: %s", m.config.ToEmail)
+	m.logger.Printf("From: %s", m.config.FromEmail)
+	m.logger.Printf("SMTP Server: %s:%s", m.config.SMTPServer, m.config.SMTPPort)
+
+	startTime := time.Now()
 
 	// Set up authentication
 	auth := smtp.PlainAuth("", m.config.SMTPUser, m.config.SMTPPassword, m.config.SMTPServer)
@@ -290,11 +337,45 @@ func (m *LTOMonitor) sendEmail(subject, body string) {
 	err := smtp.SendMail(m.config.SMTPServer+":"+m.config.SMTPPort, auth,
 		m.config.FromEmail, []string{m.config.ToEmail}, msg)
 
+	duration := time.Since(startTime)
+
 	if err != nil {
-		m.logger.Printf("Failed to send email: %v", err)
+		m.logger.Printf("FAILED to send email (took %v): %v", duration, err)
+		m.consoleLogger.Printf("FAILED to send email: %v", err)
 	} else {
-		m.logger.Println("Email sent successfully")
+		m.logger.Printf("SUCCESS: Email sent successfully (took %v)", duration)
+		m.consoleLogger.Printf("SUCCESS: Email sent to %s", m.config.ToEmail)
 	}
+	
+	m.logger.Printf("=== Email send attempt completed ===")
+}
+
+func (m *LTOMonitor) sendTestEmail() {
+	m.logger.Println("=== Sending test email ===")
+	m.consoleLogger.Println("Sending test email...")
+	
+	subject := "LTO Monitor - Test Email"
+	body := fmt.Sprintf(`This is a test email from the LTO Monitor application.
+
+If you receive this email, the email configuration is working correctly.
+
+Configuration Details:
+- SMTP Server: %s:%s
+- From Email: %s
+- To Email: %s
+- Check Time: %s
+
+The application is ready to monitor your LTO library.`, 
+		m.config.SMTPServer, 
+		m.config.SMTPPort,
+		m.config.FromEmail,
+		m.config.ToEmail,
+		m.config.CheckTime)
+	
+	m.sendEmail(subject, body)
+	
+	m.logger.Println("=== Test email completed ===")
+	m.consoleLogger.Println("Test email completed. Check the log file for details.")
 }
 
 func getHostname() string {
