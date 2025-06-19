@@ -21,7 +21,6 @@ type Config struct {
 	SMTPPassword string `json:"smtp_password"`
 	FromEmail    string `json:"from_email"`
 	ToEmail      string `json:"to_email"`
-	CheckTime    string `json:"check_time"` // Format: "07:00" for 7 AM
 }
 
 // LTOMonitor handles the monitoring logic
@@ -41,7 +40,6 @@ func main() {
 	smtpPassword := flag.String("smtp-password", "", "SMTP password")
 	fromEmail := flag.String("from-email", "", "From email address")
 	toEmail := flag.String("to-email", "", "Administrator email address")
-	checkTime := flag.String("check-time", "08:00", "Daily check time (HH:MM format)")
 	
 	flag.Parse()
 
@@ -69,7 +67,7 @@ func main() {
 	// If command line args provided, create config from them
 	if *smtpServer != "" || *smtpUser != "" || *toEmail != "" {
 		err := createConfigFromArgs(*smtpServer, *smtpPort, *smtpUser, *smtpPassword, 
-			*fromEmail, *toEmail, *checkTime, logger, consoleLogger)
+			*fromEmail, *toEmail, logger, consoleLogger)
 		if err != nil {
 			consoleLogger.Fatalf("Failed to create config: %v", err)
 		}
@@ -84,8 +82,7 @@ func main() {
 		consoleLogger.Fatalf("Failed to load configuration: %v", err)
 	}
 
-	logger.Printf("Configuration loaded successfully. Check time: %s, Admin email: %s", 
-		config.CheckTime, config.ToEmail)
+	logger.Printf("Configuration loaded successfully. Admin email: %s", config.ToEmail)
 
 	monitor := &LTOMonitor{
 		config:        config,
@@ -103,7 +100,7 @@ func main() {
 	monitor.run()
 }
 
-func createConfigFromArgs(smtpServer, smtpPort, smtpUser, smtpPassword, fromEmail, toEmail, checkTime string, logger, consoleLogger *log.Logger) error {
+func createConfigFromArgs(smtpServer, smtpPort, smtpUser, smtpPassword, fromEmail, toEmail string, logger, consoleLogger *log.Logger) error {
 	logger.Println("Creating configuration from command line arguments")
 	consoleLogger.Println("Creating configuration from command line arguments...")
 
@@ -137,7 +134,6 @@ func createConfigFromArgs(smtpServer, smtpPort, smtpUser, smtpPassword, fromEmai
 		SMTPPassword: smtpPassword,
 		FromEmail:    fromEmail,
 		ToEmail:      toEmail,
-		CheckTime:    checkTime,
 	}
 
 	return saveConfig(config, "config.json", logger, consoleLogger)
@@ -191,19 +187,9 @@ func createConfigInteractively(logger, consoleLogger *log.Logger) {
 	scanner.Scan()
 	config.ToEmail = strings.TrimSpace(scanner.Text())
 
-	// Check Time
-	consoleLogger.Print("Daily Check Time (HH:MM) [08:00]: ")
-	scanner.Scan()
-	checkTime := strings.TrimSpace(scanner.Text())
-	if checkTime == "" {
-		config.CheckTime = "08:00"
-	} else {
-		config.CheckTime = checkTime
-	}
-
 	// Validate required fields
 	if config.SMTPServer == "" || config.SMTPUser == "" || config.SMTPPassword == "" || config.ToEmail == "" {
-		consoleLogger.Println("ERROR: All fields except 'From Email' and 'Check Time' are required!")
+		consoleLogger.Println("ERROR: All fields except 'From Email' are required!")
 		return
 	}
 
@@ -218,9 +204,9 @@ func createConfigInteractively(logger, consoleLogger *log.Logger) {
 	consoleLogger.Printf("SMTP Server: %s:%s", config.SMTPServer, config.SMTPPort)
 	consoleLogger.Printf("From Email: %s", config.FromEmail)
 	consoleLogger.Printf("To Email: %s", config.ToEmail)
-	consoleLogger.Printf("Check Time: %s", config.CheckTime)
 	consoleLogger.Println("\nConfiguration saved successfully!")
 	consoleLogger.Println("You can now run the application normally or use --test to send a test email.")
+	consoleLogger.Println("Use Windows Task Scheduler to run this application twice daily.")
 }
 
 func saveConfig(config Config, filename string, logger, consoleLogger *log.Logger) error {
@@ -268,48 +254,19 @@ func loadConfig(filename string) (Config, error) {
 	if config.SMTPPort == "" {
 		config.SMTPPort = "587"
 	}
-	if config.CheckTime == "" {
-		config.CheckTime = "08:00"
-	}
 
 	return config, nil
 }
 
 func (m *LTOMonitor) run() {
-	m.logger.Printf("Monitor started. Checking time: %s", m.config.CheckTime)
-	m.consoleLogger.Printf("Monitor started. Daily check scheduled for: %s", m.config.CheckTime)
+	m.logger.Printf("Starting single LTO library check")
+	m.consoleLogger.Printf("Starting LTO library check...")
 
-	for {
-		now := time.Now()
-		targetTime, err := time.Parse("15:04", m.config.CheckTime)
-		if err != nil {
-			m.logger.Printf("ERROR: Error parsing check time: %v", err)
-			m.consoleLogger.Printf("ERROR: Error parsing check time: %v", err)
-			time.Sleep(1 * time.Minute)
-			continue
-		}
-
-		// Set target time for today
-		target := time.Date(now.Year(), now.Month(), now.Day(),
-			targetTime.Hour(), targetTime.Minute(), 0, 0, now.Location())
-
-		// If target time has passed today, set it for tomorrow
-		if now.After(target) {
-			target = target.Add(24 * time.Hour)
-		}
-
-		// Sleep until target time
-		duration := target.Sub(now)
-		m.logger.Printf("Next check scheduled for: %v (sleeping for %v)", target, duration)
-		m.consoleLogger.Printf("Next check scheduled for: %v (sleeping for %v)", target, duration)
-		time.Sleep(duration)
-
-		// Perform the check
-		m.performCheck()
-
-		// Sleep for a minute to avoid immediate re-execution
-		time.Sleep(1 * time.Minute)
-	}
+	// Perform the check immediately
+	m.performCheck()
+	
+	m.logger.Printf("Single check completed, exiting")
+	m.consoleLogger.Printf("Check completed, exiting")
 }
 
 func (m *LTOMonitor) performCheck() {
@@ -497,14 +454,12 @@ Configuration Details:
 - SMTP Server: %s:%s
 - From Email: %s
 - To Email: %s
-- Check Time: %s
 
 The application is ready to monitor your LTO library.`, 
 		m.config.SMTPServer, 
 		m.config.SMTPPort,
 		m.config.FromEmail,
-		m.config.ToEmail,
-		m.config.CheckTime)
+		m.config.ToEmail)
 	
 	m.sendEmail(subject, body)
 	
